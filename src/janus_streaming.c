@@ -783,7 +783,7 @@ static void *janus_streaming_handler(void *data) {
             json_t *id = json_object_get(message, "id");
             guint64 id_value = json_integer_value(id);
 
-            JANUS_LOG(LOG_VERB, "Watch for id: %d\n", id_value);
+            JANUS_LOG(LOG_VERB, "Watch for id: %lu\n", id_value);
 
             janus_mutex_lock(&mountpoints_mutex);
             janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, &id_value);

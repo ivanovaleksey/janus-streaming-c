@@ -38,95 +38,6 @@
 #define JANUS_STREAMING_PACKAGE        "janus.plugin.streaming"
 
 
-/* Parameter validation */
-static struct janus_json_parameter request_parameters[] = {
-    {"request", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
-};
-static struct janus_json_parameter id_parameters[] = {
-    {"id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE}
-};
-static struct janus_json_parameter watch_parameters[] = {
-    {"id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"pin", JSON_STRING, 0},
-    {"offer_audio", JANUS_JSON_BOOL, 0},
-    {"offer_video", JANUS_JSON_BOOL, 0},
-    {"offer_data", JANUS_JSON_BOOL, 0}
-};
-static struct janus_json_parameter adminkey_parameters[] = {
-    {"admin_key", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
-};
-static struct janus_json_parameter create_parameters[] = {
-    {"type", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
-    {"secret", JSON_STRING, 0},
-    {"pin", JSON_STRING, 0},
-    {"permanent", JANUS_JSON_BOOL, 0}
-};
-static struct janus_json_parameter rtp_parameters[] = {
-    {"id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-    {"name", JSON_STRING, 0},
-    {"description", JSON_STRING, 0},
-    {"is_private", JANUS_JSON_BOOL, 0},
-    {"audio", JANUS_JSON_BOOL, 0},
-    {"video", JANUS_JSON_BOOL, 0}
-};
-static struct janus_json_parameter live_parameters[] = {
-    {"id", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-    {"name", JSON_STRING, 0},
-    {"description", JSON_STRING, 0},
-    {"is_private", JANUS_JSON_BOOL, 0},
-    {"filename", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
-    {"audio", JANUS_JSON_BOOL, 0},
-    {"video", JANUS_JSON_BOOL, 0}
-};
-static struct janus_json_parameter rtp_audio_parameters[] = {
-    {"audiomcast", JSON_STRING, 0},
-    {"audioport", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"audiopt", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"audiortpmap", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
-    {"audiofmtp", JSON_STRING, 0},
-    {"audioiface", JSON_STRING, 0}
-};
-static struct janus_json_parameter rtp_video_parameters[] = {
-    {"videomcast", JSON_STRING, 0},
-    {"videoport", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"videopt", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"videortpmap", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
-    {"videofmtp", JSON_STRING, 0},
-    {"videobufferkf", JANUS_JSON_BOOL, 0},
-    {"videoiface", JSON_STRING, 0},
-    {"videosimulcast", JANUS_JSON_BOOL, 0},
-    {"videoport2", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-    {"videoport3", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-};
-static struct janus_json_parameter rtp_data_parameters[] = {
-    {"dataport", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"databuffermsg", JANUS_JSON_BOOL, 0},
-    {"dataiface", JSON_STRING, 0}
-};
-static struct janus_json_parameter destroy_parameters[] = {
-    {"id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"permanent", JANUS_JSON_BOOL, 0}
-};
-static struct janus_json_parameter recording_parameters[] = {
-    {"id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
-    {"action", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
-};
-static struct janus_json_parameter recording_start_parameters[] = {
-    {"audio", JSON_STRING, 0},
-    {"video", JSON_STRING, 0},
-    {"data", JSON_STRING, 0}
-};
-static struct janus_json_parameter recording_stop_parameters[] = {
-    {"audio", JANUS_JSON_BOOL, 0},
-    {"video", JANUS_JSON_BOOL, 0},
-    {"data", JANUS_JSON_BOOL, 0}
-};
-static struct janus_json_parameter simulcast_parameters[] = {
-    {"substream", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE},
-    {"temporal", JSON_INTEGER, JANUS_JSON_PARAM_POSITIVE}
-};
-
-
 typedef struct janus_streaming_message {
     janus_plugin_session *handle;
     char *transaction;
@@ -289,8 +200,6 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data);
 #pragma region static
 
 static volatile gint initialized = 0, stopping = 0;
-static gboolean notify_events = FALSE;
-
 static janus_config *config;
 static janus_callbacks *gateway;
 static GThread *handler_thread;

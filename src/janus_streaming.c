@@ -8,7 +8,6 @@
 #include "../mutex.h"
 #include "../rtp.h"
 #include "../rtcp.h"
-#include "../record.h"
 #include "../utils.h"
 #include "../ip-utils.h"
 
@@ -103,10 +102,6 @@ typedef struct janus_streaming_rtp_source {
     gint video_port[3];
     in_addr_t video_mcast;
     gint data_port;
-    janus_recorder *arc;	/* The Janus recorder instance for this streams's audio, if enabled */
-    janus_recorder *vrc;	/* The Janus recorder instance for this streams's video, if enabled */
-    janus_recorder *drc;	/* The Janus recorder instance for this streams's data, if enabled */
-    janus_mutex rec_mutex;	/* Mutex to protect the recorders from race conditions */
     int audio_fd;
     int video_fd[3];
     int data_fd;
@@ -181,7 +176,6 @@ void janus_streaming_hangup_media(janus_plugin_session *handle);
 void janus_streaming_destroy_session(janus_plugin_session *handle, int *error);
 json_t *janus_streaming_query_session(janus_plugin_session *handle);
 
-// static int janus_streaming_get_fd_port(int fd);
 static void *janus_streaming_handler(void *data);
 
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
@@ -1185,10 +1179,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     live_rtp_source->video_iface = dovideo && !janus_network_address_is_null(viface) ? *viface : nil;
     live_rtp_source->data_port = dodata ? dport : -1;
     live_rtp_source->data_iface = dodata && !janus_network_address_is_null(diface) ? *diface : nil;
-    live_rtp_source->arc = NULL;
-    live_rtp_source->vrc = NULL;
-    live_rtp_source->drc = NULL;
-    janus_mutex_init(&live_rtp_source->rec_mutex);
     live_rtp_source->audio_fd = audio_fd;
     live_rtp_source->video_fd[0] = video_fd[0];
     live_rtp_source->video_fd[1] = video_fd[1];
@@ -1383,8 +1373,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     JANUS_LOG(LOG_VERB, " ... updated RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
                         ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
                     packet.data->type = mountpoint->codecs.audio_pt;
-                    /* Is there a recorder? */
-                    janus_recorder_save_frame(source->arc, buffer, bytes);
                     /* Backup the actual timestamp and sequence number set by the restreamer, in case switching is involved */
                     packet.timestamp = ntohl(packet.data->timestamp);
                     packet.seq_number = ntohs(packet.data->seq_number);
@@ -1529,9 +1517,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     JANUS_LOG(LOG_HUGE, " ... updated RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
                         ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
                     packet.data->type = mountpoint->codecs.video_pt;
-                    /* Is there a recorder? (FIXME notice we only record the first substream, if simulcasting) */
-                    if(index == 0)
-                        janus_recorder_save_frame(source->vrc, buffer, bytes);
                     /* Backup the actual timestamp and sequence number set by the restreamer, in case switching is involved */
                     packet.timestamp = ntohl(packet.data->timestamp);
                     packet.seq_number = ntohs(packet.data->seq_number);
@@ -1562,8 +1547,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     packet.data = (rtp_header *)text;
                     packet.length = bytes+1;
                     packet.is_rtp = FALSE;
-                    /* Is there a recorder? */
-                    janus_recorder_save_frame(source->drc, text, strlen(text));
                     /* Are we keeping track of the last message being relayed? */
                     if(source->buffermsg) {
                         janus_mutex_lock(&source->buffermsg_mutex);

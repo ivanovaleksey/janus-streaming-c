@@ -44,12 +44,6 @@ typedef struct janus_streaming_message {
     json_t *jsep;
 } janus_streaming_message;
 
-typedef enum janus_streaming_type {
-    janus_streaming_type_none = 0,
-    janus_streaming_type_live,
-    janus_streaming_type_on_demand,
-} janus_streaming_type;
-
 typedef enum janus_streaming_source {
     janus_streaming_source_none = 0,
     janus_streaming_source_file,
@@ -85,7 +79,6 @@ typedef struct janus_streaming_mountpoint {
     char *pin;
     gboolean enabled;
     gboolean active;
-    janus_streaming_type streaming_type;
     janus_streaming_source streaming_source;
     void *source;	/* Can differ according to the source type */
     GDestroyNotify source_destroy;
@@ -1065,7 +1058,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     live_rtp->audio = doaudio;
     live_rtp->video = dovideo;
     live_rtp->data = dodata;
-    live_rtp->streaming_type = janus_streaming_type_live;
     live_rtp->streaming_source = janus_streaming_source_rtp;
     janus_streaming_rtp_source *live_rtp_source = g_malloc0(sizeof(janus_streaming_rtp_source));
     live_rtp_source->audio_iface = doaudio && !janus_network_address_is_null(aiface) ? *aiface : nil;

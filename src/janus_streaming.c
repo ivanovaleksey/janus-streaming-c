@@ -106,13 +106,7 @@ typedef struct janus_streaming_rtp_source {
     int video_fd[3];
     int data_fd;
     gboolean simulcast;
-    gint64 last_received_audio;
-    gint64 last_received_video;
-    gint64 last_received_data;
     janus_streaming_rtp_keyframe keyframe;
-    gboolean buffermsg;
-    void *last_msg;
-    janus_mutex buffermsg_mutex;
     janus_network_address audio_iface;
     janus_network_address video_iface;
     janus_network_address data_iface;
@@ -181,9 +175,9 @@ static void *janus_streaming_handler(void *data);
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     uint64_t id, char *name, char *desc,
     gboolean doaudio, char* amcast, const janus_network_address *aiface, uint16_t aport, uint8_t acodec, char *artpmap, char *afmtp,
-    gboolean dovideo, char* vmcast, const janus_network_address *viface, uint16_t vport, uint8_t vcodec, char *vrtpmap, char *vfmtp, gboolean bufferkf,
+    gboolean dovideo, char* vmcast, const janus_network_address *viface, uint16_t vport, uint8_t vcodec, char *vrtpmap, char *vfmtp,
         gboolean simulcast, uint16_t vport2, uint16_t vport3,
-    gboolean dodata, const janus_network_address *diface, uint16_t dport, gboolean buffermsg);
+    gboolean dodata, const janus_network_address *diface, uint16_t dport);
 
 static void *janus_streaming_relay_thread(void *data);
 static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data);
@@ -319,24 +313,16 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
     janus_config_item *vcodec = janus_config_get_item(cat, "videopt");
     janus_config_item *vrtpmap = janus_config_get_item(cat, "videortpmap");
     janus_config_item *vfmtp = janus_config_get_item(cat, "videofmtp");
-    janus_config_item *vkf = janus_config_get_item(cat, "videobufferkf");
     janus_config_item *vsc = janus_config_get_item(cat, "videosimulcast");
     janus_config_item *vport2 = janus_config_get_item(cat, "videoport2");
     janus_config_item *vport3 = janus_config_get_item(cat, "videoport3");
     janus_config_item *dport = janus_config_get_item(cat, "dataport");
-    janus_config_item *dbm = janus_config_get_item(cat, "databuffermsg");
     gboolean is_private = priv && priv->value && janus_is_true(priv->value);
     gboolean doaudio = audio && audio->value && janus_is_true(audio->value);
     gboolean dovideo = video && video->value && janus_is_true(video->value);
     gboolean dodata = data && data->value && janus_is_true(data->value);
-    gboolean bufferkf = video && vkf && vkf->value && janus_is_true(vkf->value);
     gboolean simulcast = video && vsc && vsc->value && janus_is_true(vsc->value);
-    if(simulcast && bufferkf) {
-        /* FIXME We'll need to take care of this */
-        JANUS_LOG(LOG_WARN, "Simulcasting enabled, so disabling buffering of keyframes\n");
-        bufferkf = FALSE;
-    }
-    gboolean buffermsg = data && dbm && dbm->value && janus_is_true(dbm->value);
+
     if(!doaudio && !dovideo && !dodata) {
         JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', no audio, video or data have to be streamed...\n", cat->name);
         cl = cl->next;
@@ -436,14 +422,12 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
             (vcodec && vcodec->value) ? atoi(vcodec->value) : 0,
             vrtpmap ? (char *)vrtpmap->value : NULL,
             vfmtp ? (char *)vfmtp->value : NULL,
-            bufferkf,
             simulcast,
             (vport2 && vport2->value) ? atoi(vport2->value) : 0,
             (vport3 && vport3->value) ? atoi(vport3->value) : 0,
             dodata,
             dodata && diface && diface->value ? &data_iface : NULL,
-            (dport && dport->value) ? atoi(dport->value) : 0,
-            buffermsg)) == NULL) {
+            (dport && dport->value) ? atoi(dport->value) : 0)) == NULL) {
         JANUS_LOG(LOG_ERR, "Error creating 'rtp' stream '%s'...\n", cat->name);
         cl = cl->next;
         // continue;
@@ -541,34 +525,6 @@ void janus_streaming_setup_media(janus_plugin_session *handle) {
 
     /* We only start streaming towards this user when we get this event */
     janus_rtp_switching_context_reset(&session->context);
-
-    /* If this is related to a live RTP mountpoint, any keyframe we can shoot already? */
-    // janus_streaming_mountpoint *mountpoint = session->mountpoint;
-    // if(mountpoint->streaming_source == janus_streaming_source_rtp) {
-    // 	janus_streaming_rtp_source *source = mountpoint->source;
-    // 	if(source->keyframe.enabled) {
-    // 		JANUS_LOG(LOG_HUGE, "Any keyframe to send?\n");
-    // 		janus_mutex_lock(&source->keyframe.mutex);
-    // 		if(source->keyframe.latest_keyframe != NULL) {
-    // 			JANUS_LOG(LOG_HUGE, "Yep! %d packets\n", g_list_length(source->keyframe.latest_keyframe));
-    // 			GList *temp = source->keyframe.latest_keyframe;
-    // 			while(temp) {
-    // 				janus_streaming_relay_rtp_packet(session, temp->data);
-    // 				temp = temp->next;
-    // 			}
-    // 		}
-    // 		janus_mutex_unlock(&source->keyframe.mutex);
-    // 	}
-    // 	if(source->buffermsg) {
-    // 		JANUS_LOG(LOG_HUGE, "Any recent datachannel message to send?\n");
-    // 		janus_mutex_lock(&source->buffermsg_mutex);
-    // 		if(source->last_msg != NULL) {
-    // 			JANUS_LOG(LOG_HUGE, "Yep!\n");
-    // 			janus_streaming_relay_rtp_packet(session, source->last_msg);
-    // 		}
-    // 		janus_mutex_unlock(&source->buffermsg_mutex);
-    // 	}
-    // }
 
     session->started = TRUE;
 
@@ -1019,14 +975,7 @@ static void janus_streaming_rtp_source_free(janus_streaming_rtp_source *source) 
     }
     source->keyframe.latest_keyframe = NULL;
     janus_mutex_unlock(&source->keyframe.mutex);
-    janus_mutex_lock(&source->buffermsg_mutex);
-    if(source->last_msg) {
-        janus_streaming_rtp_relay_packet *pkt = (janus_streaming_rtp_relay_packet *)source->last_msg;
-        g_free(pkt->data);
-        g_free(pkt);
-        source->last_msg = NULL;
-    }
-    janus_mutex_unlock(&source->buffermsg_mutex);
+
     g_free(source);
 }
 
@@ -1034,9 +983,9 @@ static void janus_streaming_rtp_source_free(janus_streaming_rtp_source *source) 
 janus_streaming_mountpoint *janus_streaming_create_rtp_source(
         uint64_t id, char *name, char *desc,
         gboolean doaudio, char *amcast, const janus_network_address *aiface, uint16_t aport, uint8_t acodec, char *artpmap, char *afmtp,
-        gboolean dovideo, char *vmcast, const janus_network_address *viface, uint16_t vport, uint8_t vcodec, char *vrtpmap, char *vfmtp, gboolean bufferkf,
+        gboolean dovideo, char *vmcast, const janus_network_address *viface, uint16_t vport, uint8_t vcodec, char *vrtpmap, char *vfmtp,
             gboolean simulcast, uint16_t vport2, uint16_t vport3,
-        gboolean dodata, const janus_network_address *diface, uint16_t dport, gboolean buffermsg) {
+        gboolean dodata, const janus_network_address *diface, uint16_t dport) {
 
     JANUS_LOG(LOG_VERB, "janus_streaming_create_rtp_source!!!\n");
 
@@ -1184,17 +1133,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     live_rtp_source->video_fd[1] = video_fd[1];
     live_rtp_source->video_fd[2] = video_fd[2];
     live_rtp_source->data_fd = data_fd;
-    live_rtp_source->last_received_audio = janus_get_monotonic_time();
-    live_rtp_source->last_received_video = janus_get_monotonic_time();
-    live_rtp_source->last_received_data = janus_get_monotonic_time();
-    live_rtp_source->keyframe.enabled = bufferkf;
-    live_rtp_source->keyframe.latest_keyframe = NULL;
-    live_rtp_source->keyframe.temp_keyframe = NULL;
-    live_rtp_source->keyframe.temp_ts = 0;
-    janus_mutex_init(&live_rtp_source->keyframe.mutex);
-    live_rtp_source->buffermsg = buffermsg;
-    live_rtp_source->last_msg = NULL;
-    janus_mutex_init(&live_rtp_source->buffermsg_mutex);
     live_rtp->source = live_rtp_source;
     live_rtp->source_destroy = (GDestroyNotify) janus_streaming_rtp_source_free;
     live_rtp->codecs.audio_pt = doaudio ? acodec : -1;
@@ -1337,7 +1275,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     /* Got something audio (RTP) */
                     if(mountpoint->active == FALSE)
                         mountpoint->active = TRUE;
-                    source->last_received_audio = janus_get_monotonic_time();
                     addrlen = sizeof(remote);
                     bytes = recvfrom(audio_fd, buffer, 1500, 0, (struct sockaddr*)&remote, &addrlen);
                     if(bytes < 0) {
@@ -1394,7 +1331,6 @@ static void *janus_streaming_relay_thread(void *data) {
                         index = 2;
                     if(mountpoint->active == FALSE)
                         mountpoint->active = TRUE;
-                    source->last_received_video = janus_get_monotonic_time();
                     addrlen = sizeof(remote);
                     bytes = recvfrom(fds[i].fd, buffer, 1500, 0, (struct sockaddr*)&remote, &addrlen);
                     if(bytes < 0) {
@@ -1532,7 +1468,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     /* Got something data (text) */
                     if(mountpoint->active == FALSE)
                         mountpoint->active = TRUE;
-                    source->last_received_data = janus_get_monotonic_time();
                     addrlen = sizeof(remote);
                     bytes = recvfrom(data_fd, buffer, 1500, 0, (struct sockaddr*)&remote, &addrlen);
                     if(bytes < 0) {
@@ -1547,16 +1482,7 @@ static void *janus_streaming_relay_thread(void *data) {
                     packet.data = (rtp_header *)text;
                     packet.length = bytes+1;
                     packet.is_rtp = FALSE;
-                    /* Are we keeping track of the last message being relayed? */
-                    if(source->buffermsg) {
-                        janus_mutex_lock(&source->buffermsg_mutex);
-                        janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
-                        pkt->data = g_malloc0(bytes+1);
-                        memcpy(pkt->data, text, bytes+1);
-                        packet.is_rtp = FALSE;
-                        pkt->length = bytes+1;
-                        janus_mutex_unlock(&source->buffermsg_mutex);
-                    }
+
                     /* Go! */
                     janus_mutex_lock(&mountpoint->mutex);
                     g_list_foreach(mountpoint->listeners, janus_streaming_relay_rtp_packet, &packet);

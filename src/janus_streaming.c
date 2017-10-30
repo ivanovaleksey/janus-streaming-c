@@ -76,7 +76,7 @@ typedef struct janus_streaming_mountpoint {
     void *source;	/* Can differ according to the source type */
     GDestroyNotify source_destroy;
     janus_streaming_codecs codecs;
-    gboolean audio, video, data;
+    gboolean audio, video;
     GList/*<unowned janus_streaming_session>*/ *listeners;
     gint64 destroyed;
     janus_mutex mutex;
@@ -85,10 +85,8 @@ typedef struct janus_streaming_mountpoint {
 typedef struct janus_streaming_rtp_source {
     gint audio_port;
     gint video_port[3];
-    gint data_port;
     int audio_fd;
     int video_fd[3];
-    int data_fd;
     gboolean simulcast;
     janus_streaming_rtp_keyframe keyframe;
 } janus_streaming_rtp_source;
@@ -98,7 +96,7 @@ typedef struct janus_streaming_session {
     janus_streaming_mountpoint *mountpoint;
     gboolean started;
     gboolean paused;
-    gboolean audio, video, data;		/* Whether audio, video and/or data must be sent to this listener */
+    gboolean audio, video;		/* Whether audio or video must be sent to this listener */
     janus_rtp_switching_context context;
     int substream;			/* Which simulcast substream we should forward, in case the mountpoint is simulcasting */
     int substream_target;	/* As above, but to handle transitions (e.g., wait for keyframe) */
@@ -157,8 +155,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     uint64_t id, char *name, char *desc,
     gboolean doaudio, uint16_t aport, uint8_t acodec, char *artpmap, char *afmtp,
     gboolean dovideo, uint16_t vport, uint8_t vcodec, char *vrtpmap, char *vfmtp,
-    gboolean simulcast, uint16_t vport2, uint16_t vport3,
-    gboolean dodata, uint16_t dport);
+    gboolean simulcast, uint16_t vport2, uint16_t vport3);
 
 static void *janus_streaming_relay_thread(void *data);
 static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data);
@@ -279,7 +276,6 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
     janus_config_item *pin = janus_config_get_item(cat, "pin");
     janus_config_item *audio = janus_config_get_item(cat, "audio");
     janus_config_item *video = janus_config_get_item(cat, "video");
-    janus_config_item *data = janus_config_get_item(cat, "data");
     janus_config_item *aport = janus_config_get_item(cat, "audioport");
     janus_config_item *acodec = janus_config_get_item(cat, "audiopt");
     janus_config_item *artpmap = janus_config_get_item(cat, "audiortpmap");
@@ -291,15 +287,13 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
     janus_config_item *vsc = janus_config_get_item(cat, "videosimulcast");
     janus_config_item *vport2 = janus_config_get_item(cat, "videoport2");
     janus_config_item *vport3 = janus_config_get_item(cat, "videoport3");
-    janus_config_item *dport = janus_config_get_item(cat, "dataport");
     gboolean is_private = priv && priv->value && janus_is_true(priv->value);
     gboolean doaudio = audio && audio->value && janus_is_true(audio->value);
     gboolean dovideo = video && video->value && janus_is_true(video->value);
-    gboolean dodata = data && data->value && janus_is_true(data->value);
     gboolean simulcast = video && vsc && vsc->value && janus_is_true(vsc->value);
 
-    if(!doaudio && !dovideo && !dodata) {
-        JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', no audio, video or data have to be streamed...\n", cat->name);
+    if(!doaudio && !dovideo) {
+        JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', no audio or video have to be streamed...\n", cat->name);
         cl = cl->next;
         // continue;
     }
@@ -319,16 +313,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
         cl = cl->next;
         // continue;
     }
-    if(dodata && (dport == NULL || dport->value == NULL || atoi(dport->value) == 0)) {
-        JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream '%s', missing mandatory information for data...\n", cat->name);
-        cl = cl->next;
-        // continue;
-    }
 
-    JANUS_LOG(LOG_VERB, "Audio %s, Video %s, Data %s\n",
-        doaudio ? "enabled" : "NOT enabled",
-        dovideo ? "enabled" : "NOT enabled",
-        dodata ? "enabled" : "NOT enabled");
     janus_streaming_mountpoint *mp = NULL;
 
     if((mp = janus_streaming_create_rtp_source(
@@ -347,9 +332,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
             vfmtp ? (char *)vfmtp->value : NULL,
             simulcast,
             (vport2 && vport2->value) ? atoi(vport2->value) : 0,
-            (vport3 && vport3->value) ? atoi(vport3->value) : 0,
-            dodata,
-            (dport && dport->value) ? atoi(dport->value) : 0)) == NULL) {
+            (vport3 && vport3->value) ? atoi(vport3->value) : 0)) == NULL) {
         JANUS_LOG(LOG_ERR, "Error creating 'rtp' stream '%s'...\n", cat->name);
         cl = cl->next;
         // continue;
@@ -590,16 +573,12 @@ static void *janus_streaming_handler(void *data) {
             session->video = TRUE;	/* True by default */
             if(!mp->video)
                 session->video = FALSE;	/* ... unless the mountpoint isn't sending any video */
-            // session->data = offer_data ? json_is_true(offer_data) : TRUE;	/* True by default */
-            session->data = TRUE;	/* True by default */
-            if(!mp->data)
-                session->data = FALSE;	/* ... unless the mountpoint isn't sending any data */
+
             if((!mp->audio || !session->audio) &&
-                    (!mp->video || !session->video) &&
-                    (!mp->data || !session->data)) {
-                JANUS_LOG(LOG_ERR, "Can't offer an SDP with no audio, video or data for this mountpoint\n");
+                    (!mp->video || !session->video)) {
+                JANUS_LOG(LOG_ERR, "Can't offer an SDP with no audio or video for this mountpoint\n");
                 error_code = JANUS_STREAMING_ERROR_INVALID_REQUEST;
-                g_snprintf(error_cause, 512, "Can't offer an SDP with no audio, video or data for this mountpoint");
+                g_snprintf(error_cause, 512, "Can't offer an SDP with no audio or video for this mountpoint");
                 goto error;
             }
 
@@ -692,14 +671,7 @@ static void *janus_streaming_handler(void *data) {
                 g_strlcat(sdptemp, buffer, 2048);
                 g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
             }
-            if(mp->data && session->data) {
-                /* Add data line */
-                g_snprintf(buffer, 512,
-                    "m=application 1 DTLS/SCTP 5000\r\n"
-                    "c=IN IP4 1.1.1.1\r\n"
-                    "a=sctpmap:5000 webrtc-datachannel 16\r\n");
-                g_strlcat(sdptemp, buffer, 2048);
-            }
+
             sdp = g_strdup(sdptemp);
             JANUS_LOG(LOG_VERB, "Going to offer this SDP:\n%s\n", sdp);
             result = json_object();
@@ -817,9 +789,7 @@ static void janus_streaming_rtp_source_free(janus_streaming_rtp_source *source) 
     if(source->video_fd[2] > -1) {
         close(source->video_fd[2]);
     }
-    if(source->data_fd > -1) {
-        close(source->data_fd);
-    }
+
     janus_mutex_lock(&source->keyframe.mutex);
     GList *temp = NULL;
     while(source->keyframe.latest_keyframe) {
@@ -850,8 +820,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
         uint64_t id, char *name, char *desc,
         gboolean doaudio, uint16_t aport, uint8_t acodec, char *artpmap, char *afmtp,
         gboolean dovideo, uint16_t vport, uint8_t vcodec, char *vrtpmap, char *vfmtp,
-        gboolean simulcast, uint16_t vport2, uint16_t vport3,
-        gboolean dodata, uint16_t dport) {
+        gboolean simulcast, uint16_t vport2, uint16_t vport3) {
 
     JANUS_LOG(LOG_VERB, "janus_streaming_create_rtp_source!!!\n");
 
@@ -872,8 +841,8 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
         memset(tempname, 0, 255);
         g_snprintf(tempname, 255, "%"SCNu64, id);
     }
-    if(!doaudio && !dovideo && !dodata) {
-        JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream, no audio, video or data have to be streamed...\n");
+    if(!doaudio && !dovideo) {
+        JANUS_LOG(LOG_ERR, "Can't add 'rtp' stream, no audio or video have to be streamed...\n");
         janus_mutex_unlock(&mountpoints_mutex);
         return NULL;
     }
@@ -887,10 +856,9 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
         janus_mutex_unlock(&mountpoints_mutex);
         return NULL;
     }
-    JANUS_LOG(LOG_VERB, "Audio %s, Video %s, Data %s\n",
+    JANUS_LOG(LOG_VERB, "Audio %s, Video %s",
         doaudio ? "enabled" : "NOT enabled",
-        dovideo ? "enabled" : "NOT enabled",
-        dodata ? "enabled" : "NOT enabled");
+        dovideo ? "enabled" : "NOT enabled");
 
     /* First of all, let's check if the requested ports are free */
     int audio_fd = -1;
@@ -941,23 +909,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
             }
         }
     }
-    int data_fd = -1;
-    if(dodata) {
-        data_fd = janus_streaming_create_fd(dport, "Data", "data", name ? name : tempname);
-        if(data_fd < 0) {
-            JANUS_LOG(LOG_ERR, "Can't bind to port %d for data...\n", dport);
-            if(audio_fd > -1)
-                close(audio_fd);
-            if(video_fd[0] > -1)
-                close(video_fd[0]);
-            if(video_fd[1] > -1)
-                close(video_fd[1]);
-            if(video_fd[2] > -1)
-                close(video_fd[2]);
-            janus_mutex_unlock(&mountpoints_mutex);
-            return NULL;
-        }
-    }
+
     /* Create the mountpoint */
     janus_network_address nil;
     janus_network_address_nullify(&nil);
@@ -975,19 +927,16 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     live_rtp->active = FALSE;
     live_rtp->audio = doaudio;
     live_rtp->video = dovideo;
-    live_rtp->data = dodata;
     janus_streaming_rtp_source *live_rtp_source = g_malloc0(sizeof(janus_streaming_rtp_source));
     live_rtp_source->audio_port = doaudio ? aport : -1;
     live_rtp_source->video_port[0] = dovideo ? vport : -1;
     live_rtp_source->simulcast = dovideo && simulcast;
     live_rtp_source->video_port[1] = live_rtp_source->simulcast ? vport2 : -1;
     live_rtp_source->video_port[2] = live_rtp_source->simulcast ? vport3 : -1;
-    live_rtp_source->data_port = dodata ? dport : -1;
     live_rtp_source->audio_fd = audio_fd;
     live_rtp_source->video_fd[0] = video_fd[0];
     live_rtp_source->video_fd[1] = video_fd[1];
     live_rtp_source->video_fd[2] = video_fd[2];
-    live_rtp_source->data_fd = data_fd;
     live_rtp->source = live_rtp_source;
     live_rtp->source_destroy = (GDestroyNotify) janus_streaming_rtp_source_free;
     live_rtp->codecs.audio_pt = doaudio ? acodec : -1;
@@ -1047,7 +996,6 @@ static void *janus_streaming_relay_thread(void *data) {
 
     int audio_fd = source->audio_fd;
     int video_fd[3] = {source->video_fd[0], source->video_fd[1], source->video_fd[2]};
-    int data_fd = source->data_fd;
     char *name = g_strdup(mountpoint->name ? mountpoint->name : "??");
 
     /* Needed to fix seq and ts */
@@ -1093,12 +1041,7 @@ static void *janus_streaming_relay_thread(void *data) {
             fds[num].revents = 0;
             num++;
         }
-        if(data_fd != -1) {
-            fds[num].fd = data_fd;
-            fds[num].events = POLLIN;
-            fds[num].revents = 0;
-            num++;
-        }
+
         /* Wait for some data */
         resfd = poll(fds, num, 1000);
         JANUS_LOG(LOG_HUGE, "Polling: %d\n", resfd);
@@ -1324,32 +1267,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     g_list_foreach(mountpoint->listeners, janus_streaming_relay_rtp_packet, &packet);
                     janus_mutex_unlock(&mountpoint->mutex);
                     continue;
-                } else if(data_fd != -1 && fds[i].fd == data_fd) {
-                    /* Got something data (text) */
-                    if(mountpoint->active == FALSE)
-                        mountpoint->active = TRUE;
-                    addrlen = sizeof(remote);
-                    bytes = recvfrom(data_fd, buffer, 1500, 0, (struct sockaddr*)&remote, &addrlen);
-                    if(bytes < 0) {
-                        /* Failed to read? */
-                        continue;
-                    }
-                    /* Get a string out of the data */
-                    char *text = g_malloc0(bytes+1);
-                    memcpy(text, buffer, bytes);
-                    *(text+bytes) = '\0';
-                    /* Relay on all sessions */
-                    packet.data = (rtp_header *)text;
-                    packet.length = bytes+1;
-                    packet.is_rtp = FALSE;
-
-                    /* Go! */
-                    janus_mutex_lock(&mountpoint->mutex);
-                    g_list_foreach(mountpoint->listeners, janus_streaming_relay_rtp_packet, &packet);
-                    janus_mutex_unlock(&mountpoint->mutex);
-                    packet.data = NULL;
-                    g_free(text);
-                    continue;
                 }
             }
         }
@@ -1536,13 +1453,6 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
             packet->data->timestamp = htonl(packet->timestamp);
             packet->data->seq_number = htons(packet->seq_number);
         }
-    } else {
-        /* We're broadcasting a data channel message */
-        if(!session->data)
-            return;
-        char *text = (char *)packet->data;
-        if(gateway != NULL && text != NULL)
-            gateway->relay_data(session->handle, text, strlen(text));
     }
 
     return;

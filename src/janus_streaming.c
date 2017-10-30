@@ -113,7 +113,6 @@ typedef struct janus_streaming_session {
 typedef struct janus_streaming_rtp_relay_packet {
     rtp_header *data;
     gint length;
-    gboolean is_rtp;	/* This may be a data packet and not RTP */
     gboolean is_video;
     gboolean is_keyframe;
     gboolean simulcast;
@@ -1091,7 +1090,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     /* Relay on all sessions */
                     packet.data = rtp;
                     packet.length = bytes;
-                    packet.is_rtp = TRUE;
                     packet.is_video = FALSE;
                     packet.is_keyframe = FALSE;
 
@@ -1170,7 +1168,6 @@ static void *janus_streaming_relay_thread(void *data) {
                             memcpy(pkt->data, buffer, bytes);
                             pkt->data->ssrc = htons(1);
                             pkt->data->type = mountpoint->codecs.video_pt;
-                            packet.is_rtp = TRUE;
                             packet.is_video = TRUE;
                             packet.is_keyframe = TRUE;
                             pkt->length = bytes;
@@ -1212,7 +1209,6 @@ static void *janus_streaming_relay_thread(void *data) {
                                     memcpy(pkt->data, buffer, bytes);
                                     pkt->data->ssrc = htons(1);
                                     pkt->data->type = mountpoint->codecs.video_pt;
-                                    packet.is_rtp = TRUE;
                                     packet.is_video = TRUE;
                                     packet.is_keyframe = TRUE;
                                     pkt->length = bytes;
@@ -1234,7 +1230,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     /* Relay on all sessions */
                     packet.data = rtp;
                     packet.length = bytes;
-                    packet.is_rtp = TRUE;
                     packet.is_video = TRUE;
                     packet.is_keyframe = FALSE;
                     packet.simulcast = source->simulcast;
@@ -1320,139 +1315,137 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
         return;
     }
 
-    if(packet->is_rtp) {
-        /* Make sure there hasn't been a publisher switch by checking the SSRC */
-        if(packet->is_video) {
-            if(!session->video)
-                return;
+    /* Make sure there hasn't been a publisher switch by checking the SSRC */
+    if(packet->is_video) {
+        if(!session->video)
+            return;
 
-            if(packet->simulcast) {
-                /* Handle simulcast: don't relay if it's not the substream we wanted to handle */
-                int plen = 0;
-                char *payload = janus_rtp_payload((char *)packet->data, packet->length, &plen);
-                if(payload == NULL)
-                    return;
-                gboolean switched = FALSE;
-                if(session->substream != session->substream_target) {
-                    /* There has been a change: let's wait for a keyframe on the target */
-                    int step = (session->substream < 1 && session->substream_target == 2);
-                    if(packet->substream == session->substream_target || (step && packet->substream == step)) {
-                        if(janus_vp8_is_keyframe(payload, plen)) {
-                            JANUS_LOG(LOG_VERB, "Received keyframe on substream %d, switching (was %d)\n",
-                                packet->substream, session->substream);
-                            session->substream = packet->substream;
-                            switched = TRUE;
-                            /* Notify the viewer */
-                            json_t *event = json_object();
-                            json_object_set_new(event, "streaming", json_string("event"));
-                            json_t *result = json_object();
-                            json_object_set_new(result, "substream", json_integer(session->substream));
-                            json_object_set_new(event, "result", result);
-                            gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
-                            json_decref(event);
-                        // } else {
-                        //     JANUS_LOG(LOG_WARN, "Not a keyframe on SSRC %"SCNu32" yet, waiting before switching\n", ssrc);
-                        }
+        if(packet->simulcast) {
+            /* Handle simulcast: don't relay if it's not the substream we wanted to handle */
+            int plen = 0;
+            char *payload = janus_rtp_payload((char *)packet->data, packet->length, &plen);
+            if(payload == NULL)
+                return;
+            gboolean switched = FALSE;
+            if(session->substream != session->substream_target) {
+                /* There has been a change: let's wait for a keyframe on the target */
+                int step = (session->substream < 1 && session->substream_target == 2);
+                if(packet->substream == session->substream_target || (step && packet->substream == step)) {
+                    if(janus_vp8_is_keyframe(payload, plen)) {
+                        JANUS_LOG(LOG_VERB, "Received keyframe on substream %d, switching (was %d)\n",
+                            packet->substream, session->substream);
+                        session->substream = packet->substream;
+                        switched = TRUE;
+                        /* Notify the viewer */
+                        json_t *event = json_object();
+                        json_object_set_new(event, "streaming", json_string("event"));
+                        json_t *result = json_object();
+                        json_object_set_new(result, "substream", json_integer(session->substream));
+                        json_object_set_new(event, "result", result);
+                        gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
+                        json_decref(event);
+                    // } else {
+                    //     JANUS_LOG(LOG_WARN, "Not a keyframe on SSRC %"SCNu32" yet, waiting before switching\n", ssrc);
                     }
                 }
-                /* If we haven't received our desired substream yet, let's drop temporarily */
-                if(session->last_relayed == 0) {
-                    /* Let's start slow */
-                    session->last_relayed = janus_get_monotonic_time();
-                } else {
-                    /* Check if 250ms went by with no packet relayed */
-                    gint64 now = janus_get_monotonic_time();
-                    if(now-session->last_relayed >= 250000) {
-                        session->last_relayed = now;
-                        int substream = session->substream-1;
-                        if(substream < 0)
-                            substream = 0;
-                        if(session->substream != substream) {
-                            JANUS_LOG(LOG_WARN, "No packet received on substream %d for a while, falling back to %d\n",
-                                session->substream, substream);
-                            session->substream = substream;
-                            /* Notify the viewer */
-                            json_t *event = json_object();
-                            json_object_set_new(event, "streaming", json_string("event"));
-                            json_t *result = json_object();
-                            json_object_set_new(result, "substream", json_integer(session->substream));
-                            json_object_set_new(event, "result", result);
-                            gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
-                            json_decref(event);
-                        }
-                    }
-                }
-                if(packet->substream != session->substream) {
-                    JANUS_LOG(LOG_HUGE, "Dropping packet (it's from substream %d, but we're only relaying substream %d now\n",
-                        packet->substream, session->substream);
-                    return;
-                }
+            }
+            /* If we haven't received our desired substream yet, let's drop temporarily */
+            if(session->last_relayed == 0) {
+                /* Let's start slow */
                 session->last_relayed = janus_get_monotonic_time();
-                char vp8pd[6];
-                if(packet->codec == JANUS_STREAMING_VP8) {
-                    /* Check if there's any temporal scalability to take into account */
-                    uint16_t picid = 0;
-                    uint8_t tlzi = 0;
-                    uint8_t tid = 0;
-                    uint8_t ybit = 0;
-                    uint8_t keyidx = 0;
-                    if(janus_vp8_parse_descriptor(payload, plen, &picid, &tlzi, &tid, &ybit, &keyidx) == 0) {
-                        //~ JANUS_LOG(LOG_WARN, "%"SCNu16", %u, %u, %u, %u\n", picid, tlzi, tid, ybit, keyidx);
-                        if(session->templayer != session->templayer_target) {
-                            /* FIXME We should be smarter in deciding when to switch */
-                            session->templayer = session->templayer_target;
-                                /* Notify the viewer */
-                                json_t *event = json_object();
-                                json_object_set_new(event, "streaming", json_string("event"));
-                                json_t *result = json_object();
-                                json_object_set_new(result, "temporal", json_integer(session->templayer));
-                                json_object_set_new(event, "result", result);
-                                gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
-                                json_decref(event);
-                        }
-                        if(tid > session->templayer) {
-                            JANUS_LOG(LOG_HUGE, "Dropping packet (it's temporal layer %d, but we're capping at %d)\n",
-                                tid, session->templayer);
-                            /* We increase the base sequence number, or there will be gaps when delivering later */
-                            session->context.v_base_seq++;
-                            return;
-                        }
-                    }
-                    /* If we got here, update the RTP header and send the packet */
-                    janus_rtp_header_update(packet->data, &session->context, TRUE, 4500);
-                    memcpy(vp8pd, payload, sizeof(vp8pd));
-                    janus_vp8_simulcast_descriptor_update(payload, plen, &session->simulcast_context, switched);
-                }
-                /* Send the packet */
-                if(gateway != NULL)
-                    gateway->relay_rtp(session->handle, packet->is_video, (char *)packet->data, packet->length);
-                /* Restore the timestamp and sequence number to what the publisher set them to */
-                packet->data->timestamp = htonl(packet->timestamp);
-                packet->data->seq_number = htons(packet->seq_number);
-                if(packet->codec == JANUS_STREAMING_VP8) {
-                    /* Restore the original payload descriptor as well, as it will be needed by the next viewer */
-                    memcpy(payload, vp8pd, sizeof(vp8pd));
-                }
             } else {
-                /* Fix sequence number and timestamp (switching may be involved) */
+                /* Check if 250ms went by with no packet relayed */
+                gint64 now = janus_get_monotonic_time();
+                if(now-session->last_relayed >= 250000) {
+                    session->last_relayed = now;
+                    int substream = session->substream-1;
+                    if(substream < 0)
+                        substream = 0;
+                    if(session->substream != substream) {
+                        JANUS_LOG(LOG_WARN, "No packet received on substream %d for a while, falling back to %d\n",
+                            session->substream, substream);
+                        session->substream = substream;
+                        /* Notify the viewer */
+                        json_t *event = json_object();
+                        json_object_set_new(event, "streaming", json_string("event"));
+                        json_t *result = json_object();
+                        json_object_set_new(result, "substream", json_integer(session->substream));
+                        json_object_set_new(event, "result", result);
+                        gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
+                        json_decref(event);
+                    }
+                }
+            }
+            if(packet->substream != session->substream) {
+                JANUS_LOG(LOG_HUGE, "Dropping packet (it's from substream %d, but we're only relaying substream %d now\n",
+                    packet->substream, session->substream);
+                return;
+            }
+            session->last_relayed = janus_get_monotonic_time();
+            char vp8pd[6];
+            if(packet->codec == JANUS_STREAMING_VP8) {
+                /* Check if there's any temporal scalability to take into account */
+                uint16_t picid = 0;
+                uint8_t tlzi = 0;
+                uint8_t tid = 0;
+                uint8_t ybit = 0;
+                uint8_t keyidx = 0;
+                if(janus_vp8_parse_descriptor(payload, plen, &picid, &tlzi, &tid, &ybit, &keyidx) == 0) {
+                    //~ JANUS_LOG(LOG_WARN, "%"SCNu16", %u, %u, %u, %u\n", picid, tlzi, tid, ybit, keyidx);
+                    if(session->templayer != session->templayer_target) {
+                        /* FIXME We should be smarter in deciding when to switch */
+                        session->templayer = session->templayer_target;
+                            /* Notify the viewer */
+                            json_t *event = json_object();
+                            json_object_set_new(event, "streaming", json_string("event"));
+                            json_t *result = json_object();
+                            json_object_set_new(result, "temporal", json_integer(session->templayer));
+                            json_object_set_new(event, "result", result);
+                            gateway->push_event(session->handle, &janus_streaming_plugin, NULL, event, NULL);
+                            json_decref(event);
+                    }
+                    if(tid > session->templayer) {
+                        JANUS_LOG(LOG_HUGE, "Dropping packet (it's temporal layer %d, but we're capping at %d)\n",
+                            tid, session->templayer);
+                        /* We increase the base sequence number, or there will be gaps when delivering later */
+                        session->context.v_base_seq++;
+                        return;
+                    }
+                }
+                /* If we got here, update the RTP header and send the packet */
                 janus_rtp_header_update(packet->data, &session->context, TRUE, 4500);
-                if(gateway != NULL)
-                    gateway->relay_rtp(session->handle, packet->is_video, (char *)packet->data, packet->length);
-                /* Restore the timestamp and sequence number to what the publisher set them to */
-                packet->data->timestamp = htonl(packet->timestamp);
-                packet->data->seq_number = htons(packet->seq_number);
+                memcpy(vp8pd, payload, sizeof(vp8pd));
+                janus_vp8_simulcast_descriptor_update(payload, plen, &session->simulcast_context, switched);
+            }
+            /* Send the packet */
+            if(gateway != NULL)
+                gateway->relay_rtp(session->handle, packet->is_video, (char *)packet->data, packet->length);
+            /* Restore the timestamp and sequence number to what the publisher set them to */
+            packet->data->timestamp = htonl(packet->timestamp);
+            packet->data->seq_number = htons(packet->seq_number);
+            if(packet->codec == JANUS_STREAMING_VP8) {
+                /* Restore the original payload descriptor as well, as it will be needed by the next viewer */
+                memcpy(payload, vp8pd, sizeof(vp8pd));
             }
         } else {
-            if(!session->audio)
-                return;
             /* Fix sequence number and timestamp (switching may be involved) */
-            janus_rtp_header_update(packet->data, &session->context, FALSE, 960);
+            janus_rtp_header_update(packet->data, &session->context, TRUE, 4500);
             if(gateway != NULL)
                 gateway->relay_rtp(session->handle, packet->is_video, (char *)packet->data, packet->length);
             /* Restore the timestamp and sequence number to what the publisher set them to */
             packet->data->timestamp = htonl(packet->timestamp);
             packet->data->seq_number = htons(packet->seq_number);
         }
+    } else {
+        if(!session->audio)
+            return;
+        /* Fix sequence number and timestamp (switching may be involved) */
+        janus_rtp_header_update(packet->data, &session->context, FALSE, 960);
+        if(gateway != NULL)
+            gateway->relay_rtp(session->handle, packet->is_video, (char *)packet->data, packet->length);
+        /* Restore the timestamp and sequence number to what the publisher set them to */
+        packet->data->timestamp = htonl(packet->timestamp);
+        packet->data->seq_number = htons(packet->seq_number);
     }
 
     return;

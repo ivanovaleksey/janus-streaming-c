@@ -44,16 +44,6 @@ typedef struct janus_streaming_message {
     json_t *jsep;
 } janus_streaming_message;
 
-typedef struct janus_streaming_rtp_keyframe {
-    gboolean enabled;
-    /* If enabled, we store the packets of the last keyframe, to immediately send them for new viewers */
-    GList *latest_keyframe;
-    /* This is where we store packets while we're still collecting the whole keyframe */
-    GList *temp_keyframe;
-    guint32 temp_ts;
-    janus_mutex mutex;
-} janus_streaming_rtp_keyframe;
-
 typedef struct janus_streaming_codecs {
     gint audio_pt;
     char *audio_rtpmap;
@@ -88,7 +78,6 @@ typedef struct janus_streaming_rtp_source {
     int audio_fd;
     int video_fd[3];
     gboolean simulcast;
-    janus_streaming_rtp_keyframe keyframe;
 } janus_streaming_rtp_source;
 
 typedef struct janus_streaming_session {
@@ -114,7 +103,6 @@ typedef struct janus_streaming_rtp_relay_packet {
     rtp_header *data;
     gint length;
     gboolean is_video;
-    gboolean is_keyframe;
     gboolean simulcast;
     int codec, substream;
     uint32_t timestamp;
@@ -789,28 +777,6 @@ static void janus_streaming_rtp_source_free(janus_streaming_rtp_source *source) 
         close(source->video_fd[2]);
     }
 
-    janus_mutex_lock(&source->keyframe.mutex);
-    GList *temp = NULL;
-    while(source->keyframe.latest_keyframe) {
-        temp = g_list_first(source->keyframe.latest_keyframe);
-        source->keyframe.latest_keyframe = g_list_remove_link(source->keyframe.latest_keyframe, temp);
-        janus_streaming_rtp_relay_packet *pkt = (janus_streaming_rtp_relay_packet *)temp->data;
-        g_free(pkt->data);
-        g_free(pkt);
-        g_list_free(temp);
-    }
-    source->keyframe.latest_keyframe = NULL;
-    while(source->keyframe.temp_keyframe) {
-        temp = g_list_first(source->keyframe.temp_keyframe);
-        source->keyframe.temp_keyframe = g_list_remove_link(source->keyframe.temp_keyframe, temp);
-        janus_streaming_rtp_relay_packet *pkt = (janus_streaming_rtp_relay_packet *)temp->data;
-        g_free(pkt->data);
-        g_free(pkt);
-        g_list_free(temp);
-    }
-    source->keyframe.latest_keyframe = NULL;
-    janus_mutex_unlock(&source->keyframe.mutex);
-
     g_free(source);
 }
 
@@ -1077,21 +1043,20 @@ static void *janus_streaming_relay_thread(void *data) {
                         /* Failed to read? */
                         continue;
                     }
-                    JANUS_LOG(LOG_VERB, "************************\nGot %d bytes on the audio channel...\n", bytes);
+                    JANUS_LOG(LOG_HUGE, "************************\nGot %d bytes on the audio channel...\n", bytes);
 
                     /* If paused, ignore this packet */
                     if(!mountpoint->enabled)
                         continue;
 
                     rtp_header *rtp = (rtp_header *)buffer;
-                    JANUS_LOG(LOG_VERB, " ... parsed RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
+                    JANUS_LOG(LOG_HUGE, " ... parsed RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
                         ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
 
                     /* Relay on all sessions */
                     packet.data = rtp;
                     packet.length = bytes;
                     packet.is_video = FALSE;
-                    packet.is_keyframe = FALSE;
 
                     /* Do we have a new stream? */
                     if(ntohl(packet.data->ssrc) != a_last_ssrc) {
@@ -1106,7 +1071,7 @@ static void *janus_streaming_relay_thread(void *data) {
                     packet.data->timestamp = htonl(a_last_ts);
                     a_last_seq = (ntohs(packet.data->seq_number)-a_base_seq)+a_base_seq_prev+1;
                     packet.data->seq_number = htons(a_last_seq);
-                    JANUS_LOG(LOG_VERB, " ... updated RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
+                    JANUS_LOG(LOG_HUGE, " ... updated RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
                         ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
                     packet.data->type = mountpoint->codecs.audio_pt;
                     /* Backup the actual timestamp and sequence number set by the restreamer, in case switching is involved */
@@ -1139,88 +1104,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     JANUS_LOG(LOG_HUGE, "************************\nGot %d bytes on the video channel...\n", bytes);
                     rtp_header *rtp = (rtp_header *)buffer;
 
-                    /* First of all, let's check if this is (part of) a keyframe that we may need to save it for future reference */
-                    if(source->keyframe.enabled) {
-                        if(source->keyframe.temp_ts > 0 && ntohl(rtp->timestamp) != source->keyframe.temp_ts) {
-                            /* We received the last part of the keyframe, get rid of the old one and use this from now on */
-                            JANUS_LOG(LOG_HUGE, "[%s] ... ... last part of keyframe received! ts=%"SCNu32", %d packets\n",
-                                name, source->keyframe.temp_ts, g_list_length(source->keyframe.temp_keyframe));
-                            source->keyframe.temp_ts = 0;
-                            janus_mutex_lock(&source->keyframe.mutex);
-                            GList *temp = NULL;
-                            while(source->keyframe.latest_keyframe) {
-                                temp = g_list_first(source->keyframe.latest_keyframe);
-                                source->keyframe.latest_keyframe = g_list_remove_link(source->keyframe.latest_keyframe, temp);
-                                janus_streaming_rtp_relay_packet *pkt = (janus_streaming_rtp_relay_packet *)temp->data;
-                                g_free(pkt->data);
-                                g_free(pkt);
-                                g_list_free(temp);
-                            }
-                            source->keyframe.latest_keyframe = source->keyframe.temp_keyframe;
-                            source->keyframe.temp_keyframe = NULL;
-                            janus_mutex_unlock(&source->keyframe.mutex);
-                        } else if(ntohl(rtp->timestamp) == source->keyframe.temp_ts) {
-                            /* Part of the keyframe we're currently saving, store */
-                            janus_mutex_lock(&source->keyframe.mutex);
-                            JANUS_LOG(LOG_HUGE, "[%s] ... other part of keyframe received! ts=%"SCNu32"\n", name, source->keyframe.temp_ts);
-                            janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
-                            pkt->data = g_malloc0(bytes);
-                            memcpy(pkt->data, buffer, bytes);
-                            pkt->data->ssrc = htons(1);
-                            pkt->data->type = mountpoint->codecs.video_pt;
-                            packet.is_video = TRUE;
-                            packet.is_keyframe = TRUE;
-                            pkt->length = bytes;
-                            pkt->timestamp = source->keyframe.temp_ts;
-                            pkt->seq_number = ntohs(rtp->seq_number);
-                            source->keyframe.temp_keyframe = g_list_append(source->keyframe.temp_keyframe, pkt);
-                            janus_mutex_unlock(&source->keyframe.mutex);
-                        } else {
-                            gboolean kf = FALSE;
-                            /* Parse RTP header first */
-                            rtp_header *header = (rtp_header *)buffer;
-                            guint32 timestamp = ntohl(header->timestamp);
-                            guint16 seq = ntohs(header->seq_number);
-                            JANUS_LOG(LOG_HUGE, "Checking if packet (size=%d, seq=%"SCNu16", ts=%"SCNu32") is a key frame...\n",
-                                bytes, seq, timestamp);
-                            int plen = 0;
-                            char *payload = janus_rtp_payload(buffer, bytes, &plen);
-                            if(payload) {
-                                switch(mountpoint->codecs.video_codec) {
-                                    case JANUS_STREAMING_VP8:
-                                        kf = janus_vp8_is_keyframe(payload, plen);
-                                        break;
-                                    case JANUS_STREAMING_VP9:
-                                        kf = janus_vp9_is_keyframe(payload, plen);
-                                        break;
-                                    case JANUS_STREAMING_H264:
-                                        kf = janus_h264_is_keyframe(payload, plen);
-                                        break;
-                                    default:
-                                        break;
-                                }
-                                if(kf) {
-                                    /* New keyframe, start saving it */
-                                    source->keyframe.temp_ts = ntohl(rtp->timestamp);
-                                    JANUS_LOG(LOG_HUGE, "[%s] New keyframe received! ts=%"SCNu32"\n", name, source->keyframe.temp_ts);
-                                    janus_mutex_lock(&source->keyframe.mutex);
-                                    janus_streaming_rtp_relay_packet *pkt = g_malloc0(sizeof(janus_streaming_rtp_relay_packet));
-                                    pkt->data = g_malloc0(bytes);
-                                    memcpy(pkt->data, buffer, bytes);
-                                    pkt->data->ssrc = htons(1);
-                                    pkt->data->type = mountpoint->codecs.video_pt;
-                                    packet.is_video = TRUE;
-                                    packet.is_keyframe = TRUE;
-                                    pkt->length = bytes;
-                                    pkt->timestamp = source->keyframe.temp_ts;
-                                    pkt->seq_number = ntohs(rtp->seq_number);
-                                    source->keyframe.temp_keyframe = g_list_append(source->keyframe.temp_keyframe, pkt);
-                                    janus_mutex_unlock(&source->keyframe.mutex);
-                                }
-                            }
-                        }
-                    }
-
                     /* If paused, ignore this packet */
                     if(!mountpoint->enabled)
                         continue;
@@ -1231,7 +1114,6 @@ static void *janus_streaming_relay_thread(void *data) {
                     packet.data = rtp;
                     packet.length = bytes;
                     packet.is_video = TRUE;
-                    packet.is_keyframe = FALSE;
                     packet.simulcast = source->simulcast;
                     packet.substream = index;
                     packet.codec = mountpoint->codecs.video_codec;
@@ -1310,7 +1192,8 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
         JANUS_LOG(LOG_ERR, "Invalid session...\n");
         return;
     }
-    if(!packet->is_keyframe && (!session->started || session->paused)) {
+
+    if(!session->started || session->paused) {
         JANUS_LOG(LOG_ERR, "Streaming not started yet for this session...\n");
         return;
     }

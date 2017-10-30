@@ -44,12 +44,6 @@ typedef struct janus_streaming_message {
     json_t *jsep;
 } janus_streaming_message;
 
-typedef enum janus_streaming_source {
-    janus_streaming_source_none = 0,
-    janus_streaming_source_file,
-    janus_streaming_source_rtp,
-} janus_streaming_source;
-
 typedef struct janus_streaming_rtp_keyframe {
     gboolean enabled;
     /* If enabled, we store the packets of the last keyframe, to immediately send them for new viewers */
@@ -79,7 +73,6 @@ typedef struct janus_streaming_mountpoint {
     char *pin;
     gboolean enabled;
     gboolean active;
-    janus_streaming_source streaming_source;
     void *source;	/* Can differ according to the source type */
     GDestroyNotify source_destroy;
     janus_streaming_codecs codecs;
@@ -609,30 +602,30 @@ static void *janus_streaming_handler(void *data) {
                 g_snprintf(error_cause, 512, "Can't offer an SDP with no audio, video or data for this mountpoint");
                 goto error;
             }
-            if(mp->streaming_source == janus_streaming_source_rtp) {
-                janus_streaming_rtp_source *source = (janus_streaming_rtp_source *)mp->source;
-                if(source && source->simulcast) {
-                    /* This mountpoint is simulcasting, let's aim high by default */
-                    session->substream = -1;
-                    session->substream_target = 2;
-                    session->templayer = -1;
-                    session->templayer_target = 2;
-                    janus_vp8_simulcast_context_reset(&session->simulcast_context);
-                    /* Unless the request contains a target */
-                    json_t *substream = json_object_get(message, "substream");
-                    if(substream) {
-                        session->substream_target = json_integer_value(substream);
-                        JANUS_LOG(LOG_VERB, "Setting video substream to let through (simulcast): %d (was %d)\n",
-                            session->substream_target, session->substream);
-                    }
-                    json_t *temporal = json_object_get(message, "temporal");
-                    if(temporal) {
-                        session->templayer_target = json_integer_value(temporal);
-                        JANUS_LOG(LOG_VERB, "Setting video temporal layer to let through (simulcast): %d (was %d)\n",
-                            session->templayer_target, session->templayer);
-                    }
+
+            janus_streaming_rtp_source *source = (janus_streaming_rtp_source *)mp->source;
+            if(source && source->simulcast) {
+                /* This mountpoint is simulcasting, let's aim high by default */
+                session->substream = -1;
+                session->substream_target = 2;
+                session->templayer = -1;
+                session->templayer_target = 2;
+                janus_vp8_simulcast_context_reset(&session->simulcast_context);
+                /* Unless the request contains a target */
+                json_t *substream = json_object_get(message, "substream");
+                if(substream) {
+                    session->substream_target = json_integer_value(substream);
+                    JANUS_LOG(LOG_VERB, "Setting video substream to let through (simulcast): %d (was %d)\n",
+                        session->substream_target, session->substream);
+                }
+                json_t *temporal = json_object_get(message, "temporal");
+                if(temporal) {
+                    session->templayer_target = json_integer_value(temporal);
+                    JANUS_LOG(LOG_VERB, "Setting video temporal layer to let through (simulcast): %d (was %d)\n",
+                        session->templayer_target, session->templayer);
                 }
             }
+
             /* Let's prepare an offer now, but let's also check if there0s something we need to skip */
             sdp_type = "offer";	/* We're always going to do the offer ourselves, never answer */
             char sdptemp[2048];
@@ -898,6 +891,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
         doaudio ? "enabled" : "NOT enabled",
         dovideo ? "enabled" : "NOT enabled",
         dodata ? "enabled" : "NOT enabled");
+
     /* First of all, let's check if the requested ports are free */
     int audio_fd = -1;
     if(doaudio) {
@@ -982,7 +976,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
     live_rtp->audio = doaudio;
     live_rtp->video = dovideo;
     live_rtp->data = dodata;
-    live_rtp->streaming_source = janus_streaming_source_rtp;
     janus_streaming_rtp_source *live_rtp_source = g_malloc0(sizeof(janus_streaming_rtp_source));
     live_rtp_source->audio_port = doaudio ? aport : -1;
     live_rtp_source->video_port[0] = dovideo ? vport : -1;
@@ -1044,26 +1037,25 @@ static void *janus_streaming_relay_thread(void *data) {
         g_thread_unref(g_thread_self());
         return NULL;
     }
-    if(mountpoint->streaming_source != janus_streaming_source_rtp) {
-        JANUS_LOG(LOG_ERR, "[%s] Not an RTP source mountpoint!\n", mountpoint->name);
-        g_thread_unref(g_thread_self());
-        return NULL;
-    }
+
     janus_streaming_rtp_source *source = mountpoint->source;
     if(source == NULL) {
         JANUS_LOG(LOG_ERR, "[%s] Invalid RTP source mountpoint!\n", mountpoint->name);
         g_thread_unref(g_thread_self());
         return NULL;
     }
+
     int audio_fd = source->audio_fd;
     int video_fd[3] = {source->video_fd[0], source->video_fd[1], source->video_fd[2]};
     int data_fd = source->data_fd;
     char *name = g_strdup(mountpoint->name ? mountpoint->name : "??");
+
     /* Needed to fix seq and ts */
     uint32_t a_last_ssrc = 0, a_last_ts = 0, a_base_ts = 0, a_base_ts_prev = 0,
             v_last_ssrc[3] = {0, 0, 0}, v_last_ts[3] = {0, 0, 0}, v_base_ts[3] = {0, 0, 0}, v_base_ts_prev[3] = {0, 0, 0};
     uint16_t a_last_seq = 0, a_base_seq = 0, a_base_seq_prev = 0,
             v_last_seq[3] = {0, 0, 0}, v_base_seq[3] = {0, 0, 0}, v_base_seq_prev[3] = {0, 0, 0};
+
     /* File descriptors */
     socklen_t addrlen;
     struct sockaddr_in remote;
@@ -1144,18 +1136,22 @@ static void *janus_streaming_relay_thread(void *data) {
                         continue;
                     }
                     JANUS_LOG(LOG_VERB, "************************\nGot %d bytes on the audio channel...\n", bytes);
+
                     /* If paused, ignore this packet */
                     if(!mountpoint->enabled)
                         continue;
+
                     rtp_header *rtp = (rtp_header *)buffer;
                     JANUS_LOG(LOG_VERB, " ... parsed RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
                         ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
+
                     /* Relay on all sessions */
                     packet.data = rtp;
                     packet.length = bytes;
                     packet.is_rtp = TRUE;
                     packet.is_video = FALSE;
                     packet.is_keyframe = FALSE;
+
                     /* Do we have a new stream? */
                     if(ntohl(packet.data->ssrc) != a_last_ssrc) {
                         a_last_ssrc = ntohl(packet.data->ssrc);
@@ -1285,11 +1281,13 @@ static void *janus_streaming_relay_thread(void *data) {
                             }
                         }
                     }
+
                     /* If paused, ignore this packet */
                     if(!mountpoint->enabled)
                         continue;
                     JANUS_LOG(LOG_HUGE, " ... parsed RTP packet (ssrc=%u, pt=%u, seq=%u, ts=%u)...\n",
                         ntohl(rtp->ssrc), rtp->type, ntohs(rtp->seq_number), ntohl(rtp->timestamp));
+
                     /* Relay on all sessions */
                     packet.data = rtp;
                     packet.length = bytes;
@@ -1410,6 +1408,7 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
         if(packet->is_video) {
             if(!session->video)
                 return;
+
             if(packet->simulcast) {
                 /* Handle simulcast: don't relay if it's not the substream we wanted to handle */
                 int plen = 0;
